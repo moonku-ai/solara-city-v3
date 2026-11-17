@@ -1,41 +1,103 @@
-// A working gta6-01 entry (Node 22, standard library only): the game is this directory's
-// game/ folder, plain static files a desktop browser loads offline (game/index.html and its ES
-// modules, no library and no network request), and the program hands it in. It copies game/ and
-// screenshots/ from beside this file to /output and writes /output/dossier.json, the summary the
-// judge reads, with the vendored make.fun library. Only the plumbing, not an open world: Block
-// Dodger, a plain 2D canvas game where a paddle dodges falling blocks and catches coins, with a
-// title screen, score, lives and levels, game over and restart, flat colours and no sound. Build
-// your own open-world crime game in its place (three.js or any library you vendor under game/),
-// put your 3 or 4 PNG or JPEG screenshots in screenshots/ (the first by name is the cover) and run it.
+// Solara City — hand-in program for the make.fun gta6-01 bounty.
 //
-// Serve it locally with `node serve.ts`, then open http://localhost:8080.
-// Outside the grader's container, MAKEFUN_OUTPUT_DIR stands in for /output:
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// What this little program does, in plain terms: it takes the finished
+// game (the files under game/) and the screenshots (under screenshots/)
+// that sit next to this file, drops copies of both into the hand-in
+// folder, and then asks the kit's library to describe the whole entry
+// in a single dossier.json inside that same folder.
+//
+// The hand-in folder comes from MAKEFUN_OUTPUT_DIR when that variable
+// is set, and is /output otherwise — /output is where the grader looks.
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const out = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+// Where the dossier lands when nobody says otherwise.
+const DEFAULT_OUTPUT = '/output';
 
-mkdirSync(out, { recursive: true });
-cpSync(join(here, 'game'), join(out, 'game'), { recursive: true });
-mkdirSync(join(out, 'screenshots'), { recursive: true });
-if (existsSync(join(here, 'screenshots'))) cpSync(join(here, 'screenshots'), join(out, 'screenshots'), { recursive: true });
+// The limits the bounty sets for the dossier. They come straight from
+// the competition rules: how much source text may be quoted, how many
+// screenshots and how big each may be, and how large game/ may grow.
+const DOSSIER_LIMITS = {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  game_max_files: 993,
+  game_max_bytes: 50331648,
+  game_path_max_bytes: 1000,
+};
 
-// The scorer's own caps (reference/gate.json): only text_max_bytes shapes the bytes; the others refuse an entry the
-// scorer would refuse (more than 4 screenshots or one over 256 KiB; more than 993 files in game/ or 48 MiB of game
-// files, in all, or a path under game/ over 1000 bytes: game/ counts beside /output's own 1000-entry cap, its
-// screenshots/ and dossier.json).
-writeFileSync(
-  join(out, 'dossier.json'),
-  buildDossier(out, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    game_max_files: 993,
-    game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
-);
+// The two folders that make up the entry, named as they sit in the repo.
+const ENTRY_FOLDERS = ['game', 'screenshots'] as const;
+
+// Folder holding this file, i.e. the repository root.
+function repoRoot(): string {
+  return path.dirname(fileURLToPath(import.meta.url));
+}
+
+// Pick the hand-in folder: the environment wins, /output is the fallback.
+function pickOutputDir(): string {
+  const wanted = process.env.MAKEFUN_OUTPUT_DIR;
+  return wanted !== undefined && wanted !== '' ? wanted : DEFAULT_OUTPUT;
+}
+
+// Count every regular file below a folder, walking it by hand.
+function tallyFiles(root: string): number {
+  let total = 0;
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const current = stack.pop() as string;
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile()) {
+        total += 1;
+      }
+    }
+  }
+  return total;
+}
+
+// Copy one entry folder from the repo into the hand-in folder, wiping
+// any stale copy of it there first so nothing old can linger.
+function handOverFolder(sourceRoot: string, targetRoot: string, name: string): number {
+  const from = path.join(sourceRoot, name);
+  const to = path.join(targetRoot, name);
+  fs.rmSync(to, { recursive: true, force: true });
+  fs.cpSync(from, to, { recursive: true });
+  return tallyFiles(to);
+}
+
+// Make sure the game is really there before we hand anything in:
+// a game without its front page is not a game at all.
+function checkGameFrontPage(sourceRoot: string): void {
+  const frontPage = path.join(sourceRoot, 'game', 'index.html');
+  if (!fs.existsSync(frontPage) || !fs.statSync(frontPage).isFile()) {
+    throw new Error(`game/index.html is missing — cannot hand in ${sourceRoot}`);
+  }
+}
+
+function main(): void {
+  const root = repoRoot();
+  const target = pickOutputDir();
+
+  checkGameFrontPage(root);
+  fs.mkdirSync(target, { recursive: true });
+
+  let copied = 0;
+  for (const name of ENTRY_FOLDERS) {
+    copied += handOverFolder(root, target, name);
+  }
+
+  // Ask the kit library to write the dossier from what we just copied.
+  const dossier = buildDossier(target, DOSSIER_LIMITS);
+  const dossierPath = path.join(target, 'dossier.json');
+  fs.rmSync(dossierPath, { force: true });
+  fs.writeFileSync(dossierPath, dossier);
+
+  console.log(`handed in ${copied} files to ${target} (dossier.json: ${dossier.length} bytes)`);
+}
+
+main();
